@@ -1,0 +1,66 @@
+# Java
+target/
+*.class
+*.jar
+*.war
+*.log
+hs_err_pid*
+replay_pid*
+
+# Maven
+!/.mvn
+*.releaseBackup
+
+# IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+.settings/
+.project
+.classpath
+.factorypath
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.env
+
+# ML Models (too large for git)
+*.onnx
+ml/fraud/data/
+ml/fraud/models/
+ml/traffic/models/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Docker
+docker-compose.override.yml
+
+# IDE
+nbproject/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log.gz
+
+# Environment
+ml/venv/
+.env.local
