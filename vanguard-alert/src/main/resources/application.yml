@@ -1,0 +1,24 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: vanguard-alert
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: vanguard-alert
+      auto-offset-reset: latest
+      properties:
+        spring.json.trusted.packages: com.vanguard.common
+  thymeleaf:
+    cache: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  metrics:
+    tags:
+      application: vanguard-alert

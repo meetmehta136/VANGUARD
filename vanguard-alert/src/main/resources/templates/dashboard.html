@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>VANGUARD - Alert Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2/lib/stomp.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #30363d; }
+        .header h1 { font-size: 24px; color: #58a6ff; }
+        .status { padding: 4px 12px; border-radius: 12px; font-size: 12px; }
+        .status.connected { background: #1b6b37; color: #7ee787; }
+        .status.disconnected { background: #5c1a1a; color: #f87171; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+        .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+        .stat-value { font-size: 28px; font-weight: 700; color: #f0f6fc; }
+        .stat-label { font-size: 12px; color: #8b949e; margin-top: 4px; }
+        .alert-list { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+        .alert-header { padding: 12px 16px; background: #1c2128; border-bottom: 1px solid #30363d; font-weight: 600; font-size: 14px; }
+        .alert-item { padding: 12px 16px; border-bottom: 1px solid #21262d; display: flex; justify-content: space-between; align-items: center; }
+        .alert-item:last-child { border-bottom: none; }
+        .alert-item.high { border-left: 3px solid #f85149; }
+        .alert-item.medium { border-left: 3px solid #d29922; }
+        .alert-score { font-size: 18px; font-weight: 700; }
+        .high .alert-score { color: #f85149; }
+        .medium .alert-score { color: #d29922; }
+        .alert-details { font-size: 12px; color: #8b949e; }
+        .alert-details span { margin-right: 12px; }
+        .empty { padding: 40px; text-align: center; color: #484f58; }
+        .toast { position: fixed; top: 20px; right: 20px; background: #1b6b37; color: #7ee787; padding: 12px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.3s; }
+        .toast.show { opacity: 1; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>VANGUARD Alerts</h1>
+        <div>
+            <span id="status" class="status disconnected">Disconnected</span>
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat-card">
+            <div class="stat-value" id="totalAlerts">0</div>
+            <div class="stat-label">Total Alerts</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="highRiskAlerts">0</div>
+            <div class="stat-label">High Risk (≥0.85)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="avgScore">--</div>
+            <div class="stat-label">Avg Score</div>
+        </div>
+    </div>
+
+    <div class="alert-list">
+        <div class="alert-header">Live Alert Feed</div>
+        <div id="alertFeed">
+            <div class="empty">Waiting for alerts...</div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        let totalCount = 0;
+        let highRiskCount = 0;
+        let scores = [];
+
+        function connect() {
+            const socket = new SockJS('/ws/alerts');
+            const client = Stomp.over(socket);
+
+            client.connect({}, function(frame) {
+                document.getElementById('status').className = 'status connected';
+                document.getElementById('status').textContent = 'Connected';
+
+                client.subscribe('/topic/alerts', function(message) {
+                    const alert = JSON.parse(message.body);
+                    displayAlert(alert);
+                });
+            }, function(error) {
+                document.getElementById('status').className = 'status disconnected';
+                document.getElementById('status').textContent = 'Disconnected (reconnecting...)';
+                setTimeout(connect, 5000);
+            });
+        }
+
+        function displayAlert(alert) {
+            totalCount++;
+            scores.push(alert.fraudScore);
+            if (scores.length > 1000) scores.shift();
+            if (alert.fraudScore >= 0.85) highRiskCount++;
+
+            document.getElementById('totalAlerts').textContent = totalCount;
+            document.getElementById('highRiskAlerts').textContent = highRiskCount;
+            var avg = scores.reduce(function(a, b) { return a + b; }, 0) / scores.length;
+            document.getElementById('avgScore').textContent = avg.toFixed(3);
+
+            var feed = document.getElementById('alertFeed');
+            var empty = feed.querySelector('.empty');
+            if (empty) feed.removeChild(empty);
+
+            var item = document.createElement('div');
+            item.className = 'alert-item ' + (alert.fraudScore >= 0.85 ? 'high' : 'medium');
+
+            var time = new Date(alert.timestamp).toLocaleTimeString();
+            item.innerHTML =
+                '<div>' +
+                    '<div class="alert-score">' + (alert.fraudScore * 100).toFixed(1) + '%</div>' +
+                    '<div class="alert-details">' +
+                        '<span>Tx: ' + alert.transactionId.substring(0, 12) + '</span>' +
+                        '<span>User: ' + alert.userId.substring(0, 8) + '</span>' +
+                        '<span>Amount: ' + alert.maskedAmount + '</span>' +
+                    '</div>' +
+                '</div>' +
+                '<div style="font-size:11px;color:#484f58;">' + time + '</div>';
+
+            feed.insertBefore(item, feed.firstChild);
+
+            while (feed.children.length > 100) {
+                feed.removeChild(feed.lastChild);
+            }
+
+            var toast = document.getElementById('toast');
+            toast.textContent = 'Fraud Alert: ' + alert.transactionId.substring(0, 12);
+            toast.className = 'toast show';
+            setTimeout(function() { toast.className = 'toast'; }, 3000);
+        }
+
+        connect();
+    </script>
+</body>
+</html>
