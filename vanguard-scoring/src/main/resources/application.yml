@@ -1,0 +1,46 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: vanguard-scoring
+  kafka:
+    bootstrap-servers: localhost:9092
+    streams:
+      properties:
+        processing.guarantee: at_least_once
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: redis123
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 4
+          min-idle: 1
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      redis-feature-store:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+      kafka-producer:
+        slidingWindowSize: 5
+        failureRateThreshold: 60
+        waitDurationInOpenState: 30s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus,circuitbreakers
+  metrics:
+    tags:
+      application: vanguard-scoring
+  endpoint:
+    circuitbreakers:
+      enabled: true

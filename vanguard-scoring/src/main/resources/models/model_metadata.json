@@ -1,0 +1,31 @@
+{
+  "feature_count": 22,
+  "feature_names": [
+    "amount",
+    "oldbalanceOrg",
+    "newbalanceOrig",
+    "oldbalanceDest",
+    "newbalanceDest",
+    "type_CASH_IN",
+    "type_CASH_OUT",
+    "type_DEBIT",
+    "type_PAYMENT",
+    "type_TRANSFER",
+    "balance_delta_orig",
+    "balance_delta_dest",
+    "orig_balance_zero_after",
+    "is_high_risk_type",
+    "log_amount",
+    "amount_to_orig_balance_ratio",
+    "hour_sin",
+    "hour_cos",
+    "day_sin",
+    "day_cos",
+    "log_orig_balance",
+    "log_dest_balance"
+  ],
+  "threshold": 0.24369138479232788,
+  "auprc": 0.41012060927847477,
+  "roc_auc": 0.9784914285714286,
+  "training_approach": "balanced_undersampling_10x"
+}
