@@ -1,118 +1,85 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import LabelEncoder
 from pathlib import Path
 
-
 DATA_DIR = Path(__file__).parent / "data"
-MODELS_DIR = Path(__file__).parent / "models"
 
 
-def load_and_merge() -> pd.DataFrame:
-    txn_path = DATA_DIR / "train_transaction.csv"
-    identity_path = DATA_DIR / "train_identity.csv"
-
-    txn = pd.read_csv(txn_path)
-    print(f"Loaded transactions: {txn.shape}")
-
-    if identity_path.exists():
-        identity = pd.read_csv(identity_path)
-        print(f"Loaded identity: {identity.shape}")
-        df = txn.merge(identity, on="TransactionID", how="left")
-    else:
-        print("No identity file found — using transactions only")
-        df = txn
-
-    print(f"Merged shape: {df.shape}")
+def load_data() -> pd.DataFrame:
+    expected_cols = {'step', 'type', 'amount', 'nameOrig', 'oldbalanceOrg',
+                     'newbalanceOrig', 'nameDest', 'oldbalanceDest',
+                     'newbalanceDest', 'isFraud', 'isFlaggedFraud'}
+    df = pd.read_csv(DATA_DIR / 'train_transaction.csv')
+    print(f"Shape: {df.shape}")
+    print(f"isFraud:\n{df['isFraud'].value_counts()}")
+    fraud_rate = df['isFraud'].mean() * 100
+    print(f"Fraud rate: {fraud_rate:.4f}%")
+    actual_cols = set(df.columns)
+    if not expected_cols.issubset(actual_cols):
+        raise ValueError(f"Missing columns. Expected {expected_cols - actual_cols}")
     return df
 
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Drop columns with >80% null rate
-    null_rates = df.isnull().mean()
-    high_null_cols = null_rates[null_rates > 0.80].index.tolist()
-    df.drop(columns=high_null_cols, inplace=True)
-    print(f"Dropped {len(high_null_cols)} columns with >80% nulls")
+    type_dummies = pd.get_dummies(df['type'], prefix='type')
+    df = pd.concat([df, type_dummies], axis=1)
 
-    # Create datetime features from TransactionDT (seconds since epoch reference)
-    if "TransactionDT" in df.columns:
-        # IEEE-CIS dataset: TransactionDT is seconds from a reference date
-        # Rough conversion: reference date ~ 2017-11-30 (for IEEE fraud)
-        df["hour"] = (df["TransactionDT"] // 3600) % 24
-        df["day_of_week"] = (df["TransactionDT"] // 86400) % 7
-    else:
-        df["hour"] = 0
-        df["day_of_week"] = 0
+    df['balance_delta_orig'] = df['newbalanceOrig'] - df['oldbalanceOrg']
+    df['balance_delta_dest'] = df['newbalanceDest'] - df['oldbalanceDest']
 
-    # Cyclic encoding
-    df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
-    df["dow_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7)
-    df["dow_cos"] = np.cos(2 * np.pi * df["day_of_week"] / 7)
+    df['orig_balance_zero_after'] = (df['newbalanceOrig'] == 0).astype(int)
+    df['dest_no_increase'] = ((df['oldbalanceDest'] == df['newbalanceDest']) &
+                              (df['amount'] > 0)).astype(int)
+    df['is_high_risk_type'] = df['type'].isin(['TRANSFER', 'CASH_OUT']).astype(int)
 
-    # Amount features
-    if "TransactionAmt" in df.columns:
-        df["log_amount"] = np.log1p(df["TransactionAmt"])
-        df["amount_cents"] = (df["TransactionAmt"] * 100).astype(int) % 100
-    else:
-        df["log_amount"] = 0.0
-        df["amount_cents"] = 0
+    df['log_amount'] = np.log1p(df['amount'])
+    df['amount_to_orig_balance_ratio'] = df['amount'] / (df['oldbalanceOrg'] + 1)
 
-    # Frequency encoding for email domains
-    for col in ["P_emaildomain", "R_emaildomain"]:
-        if col in df.columns:
-            freq = df[col].fillna("MISSING").value_counts()
-            df[f"{col}_freq"] = df[col].fillna("MISSING").map(freq)
-        else:
-            df[f"{col}_freq"] = 0
+    df['hour_of_day'] = df['step'] % 24
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour_of_day'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour_of_day'] / 24)
+    df['day_of_month'] = (df['step'] // 24) % 30
+    df['day_sin'] = np.sin(2 * np.pi * df['day_of_month'] / 30)
+    df['day_cos'] = np.cos(2 * np.pi * df['day_of_month'] / 30)
 
-    # Label encode object columns
-    for col in df.select_dtypes(include=["object"]).columns:
-        if col not in ["TransactionID", "isFraud"]:
-            le = LabelEncoder()
-            df[col] = df[col].astype(str)
-            df[col] = le.fit_transform(df[col])
+    df['orig_had_zero_balance'] = (df['oldbalanceOrg'] == 0).astype(int)
+    df['dest_had_zero_balance'] = (df['oldbalanceDest'] == 0).astype(int)
+    df['log_orig_balance'] = np.log1p(df['oldbalanceOrg'])
+    df['log_dest_balance'] = np.log1p(df['oldbalanceDest'])
 
-    # Fill remaining NaN with median
-    for col in df.columns:
-        if df[col].dtype in [np.float64, np.float32, np.int64, np.int32]:
-            df[col] = df[col].fillna(df[col].median())
+    drop_cols = ['nameOrig', 'nameDest', 'type', 'isFlaggedFraud',
+                 'hour_of_day', 'day_of_month']
+    df = df.drop(columns=drop_cols)
 
     return df
 
 
 def get_feature_columns(df: pd.DataFrame) -> list:
-    exclude = {"TransactionID", "isFraud", "TransactionDT"}
-    return [c for c in df.columns if c not in exclude]
+    return [c for c in df.columns if c not in {'isFraud', 'step'}]
 
 
 def main():
-    print("=== VANGUARD Feature Engineering ===")
-
-    # Ensure directories exist
+    print("=== VANGUARD Feature Engineering (CiferAI Dataset) ===")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    df = load_and_merge()
+    df = load_data()
     df = engineer_features(df)
-
     feature_cols = get_feature_columns(df)
-    print(f"Feature count: {len(feature_cols)}")
 
-    # Save processed data
-    df.to_parquet(DATA_DIR / "processed_features.parquet", index=False)
-    print(f"Saved: {DATA_DIR / 'processed_features.parquet'}")
+    print(f"\nFeature count: {len(feature_cols)}")
+    print("Features:")
+    for col in feature_cols:
+        print(f"  {col}")
 
-    # Save feature columns
-    with open(DATA_DIR / "feature_columns.txt", "w") as f:
+    df.to_parquet(DATA_DIR / 'processed_features.parquet', index=False)
+    with open(DATA_DIR / 'feature_columns.txt', 'w') as f:
         for col in feature_cols:
-            f.write(col + "\n")
-    print(f"Saved: {DATA_DIR / 'feature_columns.txt'}")
+            f.write(col + '\n')
 
-    print(f"\nSaved to data/")
-    print(f"Feature count: {len(feature_cols)}")
+    print("\nSaved processed_features.parquet and feature_columns.txt")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
