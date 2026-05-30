@@ -1,9 +1,11 @@
-# VANGUARD — Master Execution Plan
+# VANGUARD — Master Execution Plan v2.0
 
 **Project:** Production-grade, real-time fraud intelligence platform
 **Stack:** Java 21 + Spring Boot 3.3.6 + Kafka Streams + ONNX Runtime + Redis + PostgreSQL
 **Package:** `com.vanguard.*`
-**Module prefix:** `vanguard-` (vanguard-common, vanguard-ingest, vanguard-scoring, vanguard-limiter, vanguard-alert)
+**Module prefix:** `vanguard-`
+**Dataset:** CiferAI Fraud Detection — 1.5M rows, 22 features, 0.13% fraud rate
+**Training:** Balanced undersampling (10:1 legit:fraud)
 
 ---
 
@@ -21,186 +23,168 @@ Client → Ingest(8081) → Kafka → [Streams Feature Computation] → Redis
 VANGUARD/
 ├── ml/
 │   ├── fraud/
-│   │   ├── data/              ← Kaggle IEEE-CIS dataset
-│   │   ├── models/            ← .onnx files, .json model files
-│   │   ├── feature_engineering.py
-│   │   ├── train_fraud_model.py
-│   │   └── export_onnx.py
+│   │   ├── data/
+│   │   │   ├── train_transaction.csv        (1.5M rows)
+│   │   │   ├── processed_features.parquet
+│   │   │   └── feature_columns.txt           [22 features]
+│   │   ├── models/
+│   │   │   ├── fraud_model.json
+│   │   │   ├── fraud_model.onnx
+│   │   │   └── model_metadata.json
+│   │   ├── feature_engineering.py            [✓ DONE]
+│   │   ├── train_fraud_model_v2.py           [✓ DONE]
+│   │   ├── evaluate_model.py                 [✓ DONE]
+│   │   └── export_onnx.py                    [✓ DONE]
 │   └── traffic/
-│       ├── models/            ← .onnx files, metadata
-│       ├── train_traffic_lstm.py
-│       └── export_lstm_onnx.py
-├── vanguard-common/           ← shared DTOs, constants, serdes
-├── vanguard-ingest/           ← port 8081 — REST API + Kafka producer
-├── vanguard-scoring/          ← port 8082 — ONNX inference + Streams topology
-├── vanguard-limiter/          ← port 8083 — rate limiting + LSTM forecast
-├── vanguard-alert/            ← port 8084 — WebSocket alert dashboard
-├── monitoring/
-├── load-test/
-├── docker-compose.yml
+│       ├── models/
+│       │   ├── traffic_lstm.pt
+│       │   ├── traffic_lstm.onnx
+│       │   └── traffic_metadata.json
+│       ├── train_traffic_lstm.py             [✓ DONE]
+│       └── export_lstm_onnx.py               [✓ DONE]
+├── vanguard-common/          ← DTOs + constants [✓ pom.xml + Java DTOs]
+├── vanguard-ingest/          ← port 8081        [✓ pom.xml, needs Java]
+├── vanguard-scoring/         ← port 8082        [✓ pom.xml, needs Java]
+├── vanguard-limiter/         ← port 8083        [✓ pom.xml, needs Java]
+├── vanguard-alert/           ← port 8084        [✓ pom.xml, needs Java]
+├── monitoring/               [✓ prometheus.yml]
+├── load-test/                [ ]
+├── docker-compose.yml        [✓ DONE]
 ├── VANGUARD_MASTER_PLAN.md
-├── .gitignore
-├── README.md
-└── pom.xml
+├── .gitignore                [✓ DONE]
+├── README.md                 [✓ DONE]
+├── pom.xml (root)            [✓ DONE]
 ```
 
 ---
 
-## TASK 1 — Python Environment + ML Setup
-
-**STEP 1.1** — Create folder structure (all directories above)
-**STEP 1.2** — setup.bat / setup.sh for Python venv
-**STEP 1.3** — .gitignore + initial README.md
-
-**VERIFICATION:** `python -c "import xgboost, torch, skl2onnx, onnxruntime; print('All ML deps OK')"`
+## [✓] TASK 1 — Python Environment + ML Setup
+Folder structure, venv, setup scripts, .gitignore, README. All deps installed.
 
 ---
 
-## TASK 2 — Fraud Dataset Feature Engineering
-
-**File:** `ml/fraud/feature_engineering.py`
-- load_and_merge() on TransactionID
-- Drop >80% null columns
-- Cyclic encoding (hour, day_of_week sin/cos)
-- log_amount, amount_cents
-- Frequency encoding for email domains
-- LabelEncoder for objects, fillna median
-- Output: processed_features.parquet + feature_columns.txt
-
-**VERIFICATION:** Feature count 50-120, files saved
+## [✓] TASK 2 — Feature Engineering (CiferAI Dataset)
+- 22 active features (3 constant ones dropped: `dest_no_increase`, `orig_had_zero_balance`, `dest_had_zero_balance`)
+- One-hot encoded `type`, balance deltas, cyclic time encoding, amount features
+- **Feature count: 22**
 
 ---
 
-## TASK 3 — Train XGBoost + Export ONNX
+## [✓] TASK 3 — XGBoost + ONNX Export
+**Final model:** `train_fraud_model_v2.py` — balanced undersampling (10:1 ratio)
+**ROC-AUC: 0.9785 | AUPRC: 0.4101 | Fraud caught: 68.1% | False alarms: 1.32%**
 
-**Files:**
-- `ml/fraud/train_fraud_model.py` — XGBClassifier, SMOTE, AUPRC, F2 threshold
-- `ml/fraud/export_onnx.py` — skl2onnx, target_opset=17, verify with onnxruntime
-
-**VERIFICATION:** AUPRC > 0.50, "ONNX VERIFICATION PASSED"
-
----
-
-## TASK 4 — Train LSTM Traffic Model + Export ONNX
-
-**Files:**
-- `ml/traffic/train_traffic_lstm.py` — synthetic traffic, LSTM(64,2), 60 epochs
-- `ml/traffic/export_lstm_onnx.py` — dynamic_axes, opset=17
-
-**VERIFICATION:** "LSTM ONNX VERIFICATION PASSED", both .onnx files present
+**ONNX constants (hardcoded in ModelConstants.java):**
+- `FRAUD_FEATURE_COUNT = 22`
+- `FRAUD_MODEL_INPUT_NAME = "float_input"`
+- `FRAUD_MODEL_OUTPUT_NAME = "probabilities"` (fraud prob at index [:, 1])
 
 ---
 
-## TASK 5 — Root Maven POM + Common Module
-
-**Files:**
-- Root pom.xml — multi-module, Java 21, Spring Boot 3.3.6
-- vanguard-common/pom.xml
-- Transaction.java (record), ScoredTransaction.java, FraudAlert.java
-- TrafficMetric.java, VelocityAggregate.java, UserFeatures.java
-- KafkaTopics.java, ModelConstants.java
-- Copy ONNX models to scoring resources
-
-**VERIFICATION:** `mvn clean compile -pl vanguard-common`
+## [✓] TASK 4 — LSTM Traffic Model + ONNX Export
+**Model:** LSTM(64,2), lookback=60, 60 epochs on synthetic traffic
+**ONNX constants:**
+- `LSTM_INPUT_NAME = "traffic_sequence"`
+- `LSTM_OUTPUT_NAME = "predicted_traffic"`
+- `LSTM_MEAN = 111.2f`, `LSTM_STD = 86.4f`
 
 ---
 
-## TASK 6 — ONNX Java Verification Test
+## [✓] TASK 5 — Root Maven POM + Common Module (CODE GENERATED)
+- Root pom.xml (multi-module, Java 21, Spring Boot 3.3.6)
+- All 5 module pom.xml files
+- vanguard-common: 8 Java files (Transaction, ScoredTransaction, FraudAlert, TrafficMetric, UserFeatures, VelocityAggregate, KafkaTopics, ModelConstants)
+- ONNX models copied to `vanguard-scoring/src/main/resources/models/`
 
-**File:** `vanguard-scoring/src/test/java/com/vanguard/scoring/OnnxVerificationTest.java`
-- Load both ONNX models
-- Print input/output names and shapes
-- Dummy inference
-
-**VERIFICATION:** "BOTH MODELS VERIFIED" — update ModelConstants if names differ
-
----
-
-## TASK 7 — Docker Compose Infrastructure
-
-**Services:** postgres, redis, zookeeper, kafka, kafka-ui, prometheus, grafana
-**Files:** docker-compose.yml, monitoring/prometheus.yml
-
-**VERIFICATION:** All 7 containers healthy
+**Verification:** Run `mvn clean compile -pl vanguard-common` (requires Java 21 + Maven)
 
 ---
 
-## TASK 8 — vanguard-ingest: REST API + Kafka Producer
-
-**Files:** pom.xml, Flyway migration, TransactionRequest, IngestResponse, TransactionEntity,
-TransactionRepository, KafkaProducerConfig, TransactionController, IngestResult, application.yml
-
-**I WRITE:** TransactionIngestService.java, IdempotencyService.java
-
-**VERIFICATION:** POST → 202, duplicate → 200 ALREADY_PROCESSED, Kafka UI shows message
+## [ ] TASK 6 — ONNX Java Verification Test
+**Not started.** File: `OnnxVerificationTest.java`
 
 ---
 
-## TASK 9 — Kafka Streams Feature Computation
+## [✓] TASK 7 — Docker Compose Infrastructure (CODE GENERATED)
+- `docker-compose.yml` with 7 services (postgres, redis, zookeeper, kafka, kafka-ui, prometheus, grafana)
+- `monitoring/prometheus.yml`
 
-**Files:** application.yml, KafkaStreamsConfig, CustomJsonSerde, VelocityAggregate serde,
-GeoCalculator, TransactionScoringConsumer, FeatureExtractionService
-
-**I WRITE:** FeatureComputationTopology.java, RedisFeatureStore.java
-
-**VERIFICATION:** Redis has velocity features, txn-scored topic populated
+**Verification:** `docker compose up -d`
 
 ---
 
-## TASK 10 — ONNX Fraud Scoring Service
-
-**Files:** ModelReloadEndpoint, ScoringMetrics
-
-**I WRITE:** FraudScoringService.java
-
-**VERIFICATION:** Scores return 0.0-1.0, latency < 500ms, hot-reload works
+## [ ] TASK 8 — vanguard-ingest: REST API + Kafka Producer
+**Needs:** Flyway migration, TransactionRequest, IngestResponse, TransactionEntity, TransactionRepository, KafkaProducerConfig, TransactionController, IngestResult, application.yml, application class, **TransactionIngestService.java**, **IdempotencyService.java**
 
 ---
 
-## TASK 11 — Alert Gateway + WebSocket
-
-**Files:** pom.xml, WebSocketConfig, FraudAlertConsumer, AlertDashboardController, dashboard.html
-
-**VERIFICATION:** WebSocket dashboard shows alerts for high-risk transactions
+## [ ] TASK 9 — Kafka Streams Feature Computation
+**Needs:** KafkaStreamsConfig, CustomJsonSerde, GeoCalculator, TransactionScoringConsumer, FeatureExtractionService, **FeatureComputationTopology.java**, **RedisFeatureStore.java**
 
 ---
 
-## TASK 12 — Adaptive Rate Limiter
-
-**Files:** pom.xml, @RateLimited annotation, RateLimiterService (Redis token bucket Lua),
-TrafficMetricsCollector, application.yml
-
-**I WRITE:** RateLimitAspect.java, TrafficForecaster.java
-
-**VERIFICATION:** 429 after limit exceeded, LSTM adapts limits
+## [ ] TASK 10 — ONNX Fraud Scoring Service
+**Needs:** ModelReloadEndpoint, ScoringMetrics, **FraudScoringService.java**
 
 ---
 
-## TASK 13 — Resilience4j + Drift Detection
-
-**Files:** Circuit breaker config, RedisFeatureStore updates, ModelDriftDetector (PSI)
-
-**VERIFICATION:** Redis fallback works, PSI logged
+## [ ] TASK 11 — Alert Gateway + WebSocket
+**Needs:** WebSocketConfig, FraudAlertConsumer, AlertDashboardController, dashboard.html, application class
 
 ---
 
-## TASK 14 — Testcontainers Integration Tests
-
-**File:** ScoringIntegrationTest.java — 5 test methods
-**VERIFICATION:** All 5 tests GREEN, coverage > 60%
+## [ ] TASK 12 — Adaptive Rate Limiter
+**Needs:** @RateLimited annotation, RateLimiterService, TrafficMetricsCollector, **RateLimitAspect.java**, **TrafficForecaster.java**
 
 ---
 
-## TASK 15 — Load Testing + Metrics
-
-**Files:** load-test/fraud_load_test.js (k6), monitoring/grafana-dashboard.json
-
-**VERIFICATION:** P99 < 200ms at 150 RPS, Grafana panels live
+## [ ] TASK 13 — Resilience4j + Drift Detection
+**Needs:** Circuit breaker config, ModelDriftDetector (PSI)
 
 ---
 
-## TASK 16 — GitHub CI + Final Polish
+## [ ] TASK 14 — Testcontainers Integration Tests
+**Not started.**
 
-**Files:** .github/workflows/ci.yml, .github/workflows/ml-check.yml, CONTRIBUTING.md
+---
 
-**VERIFICATION:** CI green, 50+ commits, Swagger UI accessible
+## [ ] TASK 15 — Load Testing + Metrics
+**Not started.**
+
+---
+
+## [ ] TASK 16 — GitHub CI + Final Polish
+**Not started.**
+
+---
+
+## CRITICAL JAVA CONSTANTS
+| Constant | Value | Verified |
+|---|---|---|
+| FRAUD_FEATURE_COUNT | 22 | ✅ |
+| FRAUD_MODEL_INPUT_NAME | `float_input` | ✅ ONNX |
+| FRAUD_MODEL_OUTPUT_NAME | `probabilities` | ✅ ONNX |
+| FRAUD_PROB_INDEX | 1 | ✅ |
+| FRAUD_HIGH_RISK_THRESHOLD | 0.75f | Default |
+| FRAUD_ALERT_THRESHOLD | 0.85f | Default |
+| LSTM_INPUT_NAME | `traffic_sequence` | ✅ ONNX |
+| LSTM_OUTPUT_NAME | `predicted_traffic` | ✅ ONNX |
+| LSTM_LOOKBACK | 60 | ✅ |
+| LSTM_MEAN | 111.2f | ✅ metadata |
+| LSTM_STD | 86.4f | ✅ metadata |
+| REDIS_IDEMPOTENCY_TTL | 3600s | Default |
+| REDIS_FEATURES_TTL | 7200s | Default |
+
+## PORT ALLOCATION
+| Service | Port |
+|---|---|
+| vanguard-ingest | 8081 |
+| vanguard-scoring | 8082 |
+| vanguard-limiter | 8083 |
+| vanguard-alert | 8084 |
+| PostgreSQL | 5432 |
+| Redis | 6379 |
+| Kafka | 9092 |
+| Kafka UI | 8090 |
+| Prometheus | 9090 |
+| Grafana | 3000 |
