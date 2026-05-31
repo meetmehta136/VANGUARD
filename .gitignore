@@ -40,8 +40,10 @@ build/
 # ML Models (too large for git)
 *.onnx
 ml/fraud/data/
-ml/fraud/models/
+ml/fraud/models/*
+!ml/fraud/models/*.png
 ml/traffic/models/
+!ml/traffic/models/*.png
 
 # OS
 .DS_Store
