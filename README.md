@@ -1,100 +1,123 @@
-# VANGUARD — Real-Time Fraud Intelligence Platform
+# VANGUARD — Real-Time Fraud Detection & Adaptive Rate Limiting
 
-[![Java](https://img.shields.io/badge/Java-21-orange?style=flat-square&logo=openjdk)](https://openjdk.org/projects/jdk/21/)
-[![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.3.6-6DB33F?style=flat-square&logo=springboot)](https://spring.io/projects/spring-boot)
-[![Kafka](https://img.shields.io/badge/Apache_Kafka-7.6.0-231F20?style=flat-square&logo=apachekafka)](https://kafka.apache.org/)
-[![Redis](https://img.shields.io/badge/Redis-7.0-DC382D?style=flat-square&logo=redis)](https://redis.io/)
-[![ONNX](https://img.shields.io/badge/ONNX_Runtime-1.17.0-005CED?style=flat-square)](https://onnxruntime.ai/)
-[![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+A production-grade fraud detection platform built on a microservices architecture. Every transaction is scored by an embedded XGBoost model (via ONNX Runtime) in under 5ms. An LSTM neural network continuously forecasts traffic patterns and dynamically adjusts rate limits before spikes occur.
 
-**Overview** • [Architecture](#architecture) • [ML Pipeline](#ml-pipeline) • [Quick Start](#quick-start) • [API Reference](#api-reference) • [Performance](#performance) • [Project Structure](#project-structure)
-
----
-
-## Overview
-
-VANGUARD is a production-grade real-time fraud detection and adaptive rate limiting platform built on a microservices architecture. Every financial transaction is scored by an XGBoost model (via ONNX Runtime) in under 5ms. An LSTM neural network continuously forecasts traffic patterns and dynamically adjusts rate limits before traffic spikes materialize.
-
-### Key Design Decisions
-
-| Capability | Implementation |
-|---|---|
-| **Sub-5ms inference** | ONNX Runtime embedded in JVM — no network hop vs Python microservice |
-| **Atomic idempotency** | Redis Lua single round-trip — zero race conditions at scale |
-| **Adaptive rate limits** | LSTM forecasts + token bucket — proactive, not reactive |
-| **Zero-downtime model swap** | Hot-reload via `volatile` reference swap on OrtSession singleton |
-| **Streaming feature computation** | Kafka Streams sliding windows (1m/5m) for real-time velocity features |
+**Stack:** Java 21 · Spring Boot 3.3.6 · Apache Kafka · Redis · ONNX Runtime · PostgreSQL · Docker
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          CLIENT REQUEST                                      │
-│                    POST /api/v1/transactions                                  │
-└───────────────────────────┬─────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ vanguard-ingest  :8081                                                        │
-│                                                                               │
-│  @RateLimited AOP → Redis Lua Idempotency → Kafka Producer (txn-raw)        │
-│  Aspect (5/min)     TTL=3600s             3 partitions, key=userId          │
-└─────────────────────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ vanguard-scoring  :8082                                                       │
-│                                                                               │
-│  Kafka Streams Topology                                                        │
-│    ├── SlidingWindow(1m) VelocityAggregate  ──▶ Redis Feature Store          │
-│    ├── SlidingWindow(5m) VelocityAggregate  ──▶ Redis Feature Store          │
-│    └── FraudScoringService (ONNX XGBoost)      float[22] → fraud_score      │
-│         │                                                                     │
-│         ├── score > 0.08 ──▶ txn-alerts topic + Tighten rate limit          │
-│         └── score <= 0.08 ──▶ txn-scored topic ──▶ PostgreSQL                │
-└─────────────────────────────────────────────────────────────────────────────┘
-         │                          │
-         ▼                          ▼
-┌──────────────────┐   ┌──────────────────────────────────────────────────────┐
-│ vanguard-alert   │   │ vanguard-limiter  :8083                               │
-│ :8084            │   │                                                       │
-│ WebSocket STOMP  │   │ TrafficMetrics ──▶ LSTM Forecaster ──▶ Adaptive     │
-│ Live Dashboard   │   │ Collector        60-min ring buffer  Token Bucket    │
-└──────────────────┘   └──────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           CLIENT REQUEST                                 │
+└─────────────────────┬───────────────────────────────────────────────────┘
+                      │  POST /api/v1/transactions
+                      ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    vanguard-ingest  :8081                                │
+│                                                                          │
+│   ┌──────────────────┐    ┌──────────────────┐    ┌─────────────────┐  │
+│   │  @RateLimited    │    │  Redis Lua       │    │  Kafka          │  │
+│   │  AOP Aspect      │───▶│  Idempotency     │───▶│  Producer       │  │
+│   │  5 tokens/min    │    │  TTL = 3600s     │    │  txn-raw        │  │
+│   └──────────────────┘    └──────────────────┘    └─────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                      │  Kafka: txn-raw (3 partitions, key=userId)
+                      ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    vanguard-scoring  :8082                               │
+│                                                                          │
+│   Kafka Streams Topology                                                 │
+│   txn-raw ──▶ groupByKey(userId)                                        │
+│               ├──▶ SlidingWindow(1m) → VelocityAggregate                │
+│               └──▶ SlidingWindow(5m) → Redis Feature Store              │
+│                                                                          │
+│   FraudScoringService                                                    │
+│   Redis Features ──▶ float[22] vector ──▶ OrtSession.run()             │
+│   XGBoost ONNX Model  ·  ROC-AUC: 0.9785  ·  < 5ms P99                │
+│                                                                          │
+│   score > 0.75 → txn-alerts (HIGH_RISK, tighten limits)                │
+│   score ≤ 0.75 → txn-scored (update PostgreSQL)                        │
+└─────────────────────────────────────────────────────────────────────────┘
+         │ txn-alerts                       │ txn-scored
+         ▼                                  ▼
+┌─────────────────────┐          ┌──────────────────────┐
+│  vanguard-alert     │          │  PostgreSQL           │
+│  :8084              │          │  transactions table   │
+│  WebSocket STOMP    │          │  fraud_score FLOAT    │
+│  Live Dashboard     │          │  is_high_risk BOOL    │
+└─────────────────────┘          └──────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    vanguard-limiter  :8083                               │
+│                                                                          │
+│   TrafficMetrics Collector → Ring Buffer [60 min] → LSTM ONNX          │
+│   predicted > 500 RPS → tighten limits 60%                             │
+│   predicted < 100 RPS → relax limits 100%                              │
+│                                                                          │
+│   Redis Token Bucket (Lua — atomic)                                     │
+│   capacity: 5 tokens/min · HIGH_RISK user: tightened to 1 token        │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Data Flow
-
-1. **Ingest**: HTTP POST goes through `@RateLimited` AOP aspect (token bucket), Redis Lua idempotency check, then published to Kafka `txn-raw`
-2. **Scoring**: Kafka Streams consumes `txn-raw`, computes sliding window velocity features, extracts 22 features, runs ONNX inference
-3. **Result**: If `fraud_score > 0.08`, transaction is marked `HIGH_RISK` and alert published; otherwise marked `SCORED` and persisted to PostgreSQL
-4. **Limiter**: Traffic metrics aggregated per minute, LSTM predicts future load, token bucket capacities adjusted proactively
 
 ---
 
 ## ML Pipeline
 
-### Fraud Model
+### Fraud Detection Model (XGBoost + ONNX)
 
-| Component | Detail |
+**Dataset:** CiferAI — 1,500,000 transactions
+
+**Feature engineering (22 features):**
+- Transaction type one-hot encoding (CASH_OUT, TRANSFER, PAYMENT, CASH_IN, DEBIT)
+- Balance deltas, ratios, and log transforms (orig/dest)
+- Cyclic time encoding (hour_sin, hour_cos, day_sin, day_cos)
+- Log amount and amount-ratio features
+- Interaction features (amount × type)
+
+**Training approach:**
+- Balanced undersampling at 10:1 ratio (1,984 fraud + 19,840 legit = 21,824 training rows)
+- SMOTE rejected: with only 1,984 real fraud anchors, synthetic interpolation adds noise in sparse feature space
+- XGBoost: n_estimators=500, max_depth=6, learning_rate=0.05, early_stopping_rounds=30
+- ONNX export: opset 17, IR version 9
+
+**Model metrics:**
+
+| Metric | Value |
 |---|---|
-| **Training Data** | 1.5M transactions (0.13% fraud rate) |
-| **Algorithm** | XGBoost classifier |
-| **Feature Engineering** | 22 features: one-hot encoding, balance deltas, log transforms, cyclic time encoding, interaction features |
-| **Sampling** | Balanced undersampling (10:1 legit-to-fraud) — SMOTE rejected due to sparse real fraud samples |
-| **Validation** | ROC-AUC: 0.9785, AUPRC lift: 69.3x |
-| **Runtime** | ONNX Runtime embedded in JVM — P99 < 5ms |
+| ROC-AUC | 0.9785 |
+| AUPRC lift | 69.3× over random baseline |
+| Inference P99 | < 5ms |
+| Feature count | 22 |
+| Fraud threshold | 0.75 (F2-optimized, recall-weighted) |
 
-### LSTM Traffic Forecaster
+### Traffic Forecaster (LSTM + ONNX)
 
-| Component | Detail |
-|---|---|
-| **Training Data** | 50K synthetic samples (35 days @ 1-min intervals) |
-| **Architecture** | LSTM (hidden=64, layers=2, dropout=0.2, lookback=60) |
-| **Output** | Predicted requests-per-minute for next interval |
-| **Adaptation** | predicted > 500 → tighten limits by 60%; predicted < 100 → relax |
+- Synthetic traffic data: 50,000 samples (35 days at 1-minute intervals)
+- Patterns: daily sinusoidal, weekly seasonality, Gaussian noise, injected spike events (2%)
+- Architecture: input_size=1, hidden_size=64, num_layers=2, dropout=0.2, lookback=60 min
+- Normalization: mean=111.2, std=86.4
+- Java ring buffer (ArrayDeque, capacity=60) — inference every 5 minutes
+
+---
+
+## Key Technical Decisions
+
+**Balanced undersampling over SMOTE**
+With only 1,984 real fraud cases in 1.5M rows (0.13%), SMOTE would interpolate in sparse space producing noisy synthetic boundaries. Undersampling at 10:1 gives XGBoost clean signal — ROC-AUC improved from 0.517 to 0.9785.
+
+**Redis Lua for idempotency**
+A two-command GET+SET sequence has a race condition at scale. The Lua script runs atomically on the Redis server — single round trip, zero race condition — returning DUPLICATE if the key exists, otherwise SET+EXPIRE and returning NEW.
+
+**Singleton OrtSession**
+Creating an OrtSession loads and compiles the computation graph (~800ms, off-heap allocation). Per-request creation is unusable. The singleton is created once at `@PostConstruct`; `session.run()` is stateless and thread-safe. Hot-reload swaps the volatile reference while in-flight requests complete on the old session — zero downtime.
+
+**Kafka Streams for feature computation**
+On-demand feature computation in the scoring service has no sliding window state, missing velocity features (txn_count_1m, sum_amount_5m) that are critical fraud signals. Kafka Streams runs co-located in the same JVM with RocksDB-backed state stores and Kafka changelog for fault tolerance.
+
+**Token bucket over sliding window rate limiting**
+Sliding window (Redis sorted set) is accurate but O(log n). Token bucket via Lua script is O(1) and atomic — the right tradeoff for high-throughput fraud protection.
 
 ---
 
@@ -102,42 +125,63 @@ VANGUARD is a production-grade real-time fraud detection and adaptive rate limit
 
 ### Prerequisites
 
-- Java 21 (Temurin)
-- Maven 3.9+
-- Docker Desktop
-
-### Setup
-
-```bash
-# Build
-git clone https://github.com/meetmehta136/VANGUARD.git
-cd VANGUARD && mvn clean compile
-
-# Start infrastructure
-docker compose up -d
-
-# Start services (4 terminals)
-cd vanguard-ingest && mvn spring-boot:run    # :8081
-cd vanguard-scoring && mvn spring-boot:run   # :8082
-cd vanguard-limiter && mvn spring-boot:run   # :8083
-cd vanguard-alert && mvn spring-boot:run     # :8084
+```
+Java 21 (Temurin)
+Maven 3.9+
+Docker Desktop
 ```
 
-### Test a Transaction
+### 1. Clone and build
+
+```bash
+git clone https://github.com/meetmehta136/VANGUARD.git
+cd VANGUARD
+mvn clean compile
+```
+
+### 2. Start infrastructure
+
+```bash
+docker compose up -d
+```
+
+### 3. Start services (4 terminals)
+
+```bash
+cd vanguard-ingest  && mvn spring-boot:run   # :8081
+cd vanguard-scoring && mvn spring-boot:run   # :8082
+cd vanguard-limiter && mvn spring-boot:run   # :8083
+cd vanguard-alert   && mvn spring-boot:run   # :8084
+```
+
+### 4. Submit a transaction
 
 ```bash
 curl -X POST http://localhost:8081/api/v1/transactions \
   -H "Content-Type: application/json" \
-  -d '{"transactionId":"txn-001","userId":"user-001","amount":5000.00,
-       "merchantId":"merchant-001","transactionType":"CASH_OUT",
-       "oldBalanceOrig":5000.00,"newBalanceOrig":0.00,
-       "oldBalanceDest":0.00,"newBalanceDest":0.00,
-       "latitude":21.17,"longitude":72.83,
-       "deviceId":"dev-001","ipAddress":"1.2.3.4","currency":"INR"}'
+  -d '{
+    "transactionId": "txn-001",
+    "userId": "user-001",
+    "amount": 5000.00,
+    "merchantId": "merchant-001",
+    "transactionType": "CASH_OUT",
+    "oldBalanceOrig": 5000.00,
+    "newBalanceOrig": 0.00,
+    "oldBalanceDest": 0.00,
+    "newBalanceDest": 0.00,
+    "latitude": 21.17,
+    "longitude": 72.83,
+    "deviceId": "dev-001",
+    "ipAddress": "1.2.3.4",
+    "currency": "INR"
+  }'
+```
 
-# Check result
+### 5. Verify scoring
+
+```bash
 docker exec vanguard-postgres psql -U vanguard -d vanguard \
-  -c "SELECT transaction_id, fraud_score, is_high_risk, status
+  -c "SELECT transaction_id, fraud_score, is_high_risk, status, scoring_latency_ms
       FROM transactions WHERE transaction_id='txn-001';"
 ```
 
@@ -147,92 +191,81 @@ docker exec vanguard-postgres psql -U vanguard -d vanguard \
 
 ### POST /api/v1/transactions
 
-**Request Body:**
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `transactionId` | string | ✅ | Unique ID (idempotency key) |
-| `userId` | string | ✅ | User identifier (Kafka partition key) |
-| `amount` | number | ✅ | Transaction amount |
-| `transactionType` | string | ✅ | `CASH_OUT`, `TRANSFER`, `PAYMENT`, `CASH_IN`, `DEBIT` |
-| `oldBalanceOrig` | number | ✅ | Sender balance before |
-| `newBalanceOrig` | number | ✅ | Sender balance after |
-| `oldBalanceDest` | number | ✅ | Receiver balance before |
-| `newBalanceDest` | number | ✅ | Receiver balance after |
-| `latitude` | number | ✅ | Transaction latitude |
-| `longitude` | number | ✅ | Transaction longitude |
-| `deviceId` | string | ✅ | Device identifier |
-| `ipAddress` | string | ✅ | Client IP |
-| `currency` | string | ✅ | Currency code |
+| Field | Type | Description |
+|---|---|---|
+| `transactionId` | string | Unique ID (idempotency key) |
+| `userId` | string | User identifier (Kafka partition key) |
+| `amount` | number | Transaction amount |
+| `transactionType` | string | CASH_OUT, TRANSFER, PAYMENT, CASH_IN, DEBIT |
+| `merchantId` | string | Merchant identifier |
+| `oldBalanceOrig` / `newBalanceOrig` | number | Sender balance before/after |
+| `oldBalanceDest` / `newBalanceDest` | number | Receiver balance before/after |
+| `latitude` / `longitude` | number | Transaction coordinates |
+| `deviceId` | string | Device identifier |
+| `ipAddress` | string | Client IP |
+| `currency` | string | Currency code |
 
 **Responses:**
 
 | Status | Meaning |
 |---|---|
-| `202 Accepted` | Transaction queued for scoring |
-| `200 OK` | Duplicate — already processed |
-| `429 Too Many Requests` | Rate limit exceeded |
-| `400 Bad Request` | Validation failure |
+| 202 Accepted | Transaction queued for scoring |
+| 200 OK | Duplicate — already processed |
+| 429 Too Many Requests | Rate limit exceeded |
+| 400 Bad Request | Validation failure |
 
-### Monitoring Endpoints
+### Monitoring
 
-| URL | Purpose |
+| URL | Description |
 |---|---|
-| `http://localhost:8082/actuator/health` | Scoring service health |
-| `http://localhost:8082/actuator/prometheus` | Prometheus metrics |
-| `http://localhost:8084/dashboard` | Live fraud alert dashboard |
-| `http://localhost:8090` | Kafka UI |
+| `localhost:8090` | Kafka UI |
+| `localhost:3000` | Grafana (admin/admin) |
+| `localhost:9090` | Prometheus |
+| `localhost:8084/dashboard` | Live fraud alert dashboard |
+| `localhost:8082/actuator/metrics/fraud.inference.latency` | Inference latency histogram |
+
+### Model hot-reload (zero downtime)
+
+```bash
+curl -X POST http://localhost:8082/actuator/model-reload/new_model_path
+```
 
 ---
 
 ## Performance
 
-### k6 Load Test (3-minute sustained)
+k6 load test — 3-minute sustained run:
 
-| Metric | Result | Threshold |
-|---|---|---|
-| p99 latency | **28.46ms** | < 500ms ✅ |
-| Throughput | 56.5 req/s | — |
-| Failures | **0** | < 15% ✅ |
-
-### ONNX Inference
-
-| Metric | Value |
+| Metric | Result |
 |---|---|
-| Cold start | ~800ms (one-time) |
-| P50 inference | ~1ms |
-| P99 inference | **< 5ms** |
+| p50 latency | ~8ms |
+| p95 latency | ~18ms |
+| p99 latency | 28.46ms |
+| Throughput | 56.5 req/s |
+| Total requests | 10,197 |
+| Failures | 0 |
+
+ONNX inference:
+
+| Measurement | Value |
+|---|---|
+| Cold start (model load) | ~800ms (once at startup) |
+| Warm inference P50 | ~1ms |
+| Warm inference P99 | < 5ms |
+| Model size | ~2.1 MB |
 
 ---
-
-## Project Structure
-
-```
-VANGUARD/
-├── ml/                           ← Python ML training
-│   ├── fraud/                    ← XGBoost feature engineering + ONNX export
-│   └── traffic/                  ← LSTM training + ONNX export
-├── vanguard-common/              ← Shared models, constants, Kafka topics
-├── vanguard-ingest/              ← REST API, Redis idempotency, Kafka producer
-├── vanguard-scoring/             ← ONNX inference, Kafka Streams topology
-├── vanguard-limiter/             ← AOP rate limiting, LSTM forecaster
-├── vanguard-alert/               ← WebSocket STOMP, live dashboard
-├── load-test/                    ← k6 load test scripts
-├── monitoring/                   ← Prometheus + Grafana config
-├── docker-compose.yml            ← Infrastructure orchestration
-└── pom.xml                       ← Maven multi-module root
-```
 
 ## Services
 
 | Service | Port | Responsibility |
 |---|---|---|
 | vanguard-ingest | 8081 | REST API, validation, Redis idempotency, Kafka producer |
-| vanguard-scoring | 8082 | ONNX inference, Kafka Streams, Redis feature store |
-| vanguard-limiter | 8083 | AOP rate limiting, LSTM forecaster |
-| vanguard-alert | 8084 | WebSocket STOMP, live dashboard |
+| vanguard-scoring | 8082 | ONNX inference, Kafka Streams topology, Redis feature store |
+| vanguard-limiter | 8083 | AOP rate limiting, LSTM forecaster, adaptive limits |
+| vanguard-alert | 8084 | WebSocket STOMP, Kafka consumer, live dashboard |
 
-### Infrastructure
+**Infrastructure:**
 
 | Service | Port |
 |---|---|
@@ -243,41 +276,93 @@ VANGUARD/
 | Prometheus | 9090 |
 | Grafana | 3000 |
 
-### Kafka Topics
+**Kafka topics:**
 
-| Topic | Partitions | Key | Purpose |
-|---|---|---|---|
-| `txn-raw` | 3 | userId | Raw transactions from ingest |
-| `txn-scored` | 3 | userId | Scored transactions |
-| `txn-alerts` | 1 | userId | HIGH_RISK alerts only |
-| `traffic-metrics` | 1 | global | Per-minute request counts |
+| Topic | Partitions | Purpose |
+|---|---|---|
+| `txn-raw` | 3 | Raw transactions from ingest |
+| `txn-scored` | 3 | Scored transactions |
+| `txn-alerts` | 1 | HIGH_RISK alerts only |
+| `traffic-metrics` | 1 | Per-minute request counts |
 
 ---
 
-## Configuration
+## Project Structure
 
-### Rate Limiter Defaults
-
-```yaml
-ratelimit:
-  default-capacity: 5          # tokens per user
-  default-refill: 5            # tokens/minute
-  high-risk-capacity: 1        # after HIGH_RISK detection
-  global-tighten-factor: 0.6   # during predicted traffic spike
+```
+VANGUARD/
+├── ml/
+│   ├── fraud/
+│   │   ├── feature_engineering.py
+│   │   ├── train_fraud_model.py
+│   │   ├── export_onnx.py
+│   │   ├── evaluate_model.py
+│   │   └── models/
+│   │       ├── fraud_model.onnx
+│   │       └── model_metadata.json
+│   └── traffic/
+│       ├── train_traffic_lstm.py
+│       ├── export_lstm_onnx.py
+│       └── models/
+│           ├── traffic_lstm.onnx
+│           └── traffic_metadata.json
+├── vanguard-common/         # Shared models and constants
+├── vanguard-ingest/         # REST API + Kafka producer
+├── vanguard-scoring/        # ONNX inference + Kafka Streams
+├── vanguard-limiter/        # AOP rate limiting + LSTM forecaster
+├── vanguard-alert/          # WebSocket alerts + live dashboard
+├── load-test/               # k6 scripts and results
+├── monitoring/              # Prometheus config + Grafana dashboard
+├── docker-compose.yml
+└── pom.xml
 ```
 
-### Model Constants
+---
+
+## Configuration Reference
 
 ```java
+// ModelConstants — do not change without retraining
 FRAUD_FEATURE_COUNT       = 22
-FRAUD_HIGH_RISK_THRESHOLD = 0.08f
+FRAUD_HIGH_RISK_THRESHOLD = 0.75f
 LSTM_LOOKBACK             = 60
 LSTM_MEAN                 = 111.2f
 LSTM_STD                  = 86.4f
 ```
 
+```yaml
+# vanguard-limiter/src/main/resources/application.yml
+ratelimit:
+  default-capacity: 5
+  default-refill: 5          # tokens/minute
+  high-risk-capacity: 1
+  global-tighten-factor: 0.6
+
+# vanguard-scoring/src/main/resources/application.yml
+resilience4j:
+  circuitbreaker:
+    instances:
+      redis-feature-store:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `OrtException: Invalid input name` | Model input name mismatch | Run `session.getInputNames()` and verify against ModelConstants |
+| `NativeMemoryError` on scoring | OnnxTensor not closed | Wrap tensor in try-with-resources |
+| Scoring silently stops | Kafka Streams StreamThread died | Check for `UnrecognizedPropertyException` — add `@JsonIgnoreProperties` to aggregates |
+| All scores identical | Feature vector wrong order | Verify `buildFeatureVector()` matches `feature_columns.txt` exactly |
+| `ALREADY_PROCESSED` on first call | Redis TTL not expired | `redis-cli DEL "idempotency:txn:{id}"` |
+| Stale changelog deserialization | Schema changed, old state store | Delete `%TEMP%\kafka-streams\` and restart scoring service |
+
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
