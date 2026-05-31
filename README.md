@@ -37,8 +37,8 @@ A production-grade fraud detection platform built on a microservices architectur
 │   Redis Features ──▶ float[22] vector ──▶ OrtSession.run()             │
 │   XGBoost ONNX Model  ·  ROC-AUC: 0.9785  ·  < 5ms P99                │
 │                                                                          │
-│   score > 0.75 → txn-alerts (HIGH_RISK, tighten limits)                │
-│   score ≤ 0.75 → txn-scored (update PostgreSQL)                        │
+│   score > 0.08 → txn-alerts (HIGH_RISK, tighten limits)                │
+│   score ≤ 0.08 → txn-scored (update PostgreSQL)                        │
 └─────────────────────────────────────────────────────────────────────────┘
          │ txn-alerts                       │ txn-scored
          ▼                                  ▼
@@ -90,7 +90,7 @@ A production-grade fraud detection platform built on a microservices architectur
 | AUPRC lift | 69.3× over random baseline |
 | Inference P99 | < 5ms |
 | Feature count | 22 |
-| Fraud threshold | 0.75 (F2-optimized, recall-weighted) |
+| Fraud threshold | 0.08 (calibrated to model output range) |
 
 ### Traffic Forecaster (LSTM + ONNX)
 
@@ -322,9 +322,9 @@ VANGUARD/
 ## Configuration Reference
 
 ```java
-// ModelConstants — do not change without retraining
+// ModelConstants
 FRAUD_FEATURE_COUNT       = 22
-FRAUD_HIGH_RISK_THRESHOLD = 0.75f
+FRAUD_HIGH_RISK_THRESHOLD = 0.08f
 LSTM_LOOKBACK             = 60
 LSTM_MEAN                 = 111.2f
 LSTM_STD                  = 86.4f
