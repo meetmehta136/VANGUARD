@@ -377,17 +377,7 @@ SHAP feature importance plots live in `ml/fraud/models/`:
 
 Requires `pip install shap` (adds ~20 MB). The script loads the XGBoost model, runs `shap.TreeExplainer`, and saves `shap_importance.png` + `shap_importance_bar.png`.
 
----
 
-## Demo
-
-For a live demo GIF:
-1. Start all services (ingest, scoring, limiter, alert).
-2. Open `monitoring/dashboard.html` in a browser.
-3. Screen-record ~30 seconds while sending test transactions via `load-test/`.
-4. Trim to ~15 s and save as `docs/demo.gif`.
-
----
 
 ## License
 
