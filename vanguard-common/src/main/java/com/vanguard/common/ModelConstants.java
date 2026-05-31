@@ -12,7 +12,7 @@ public final class ModelConstants {
     public static final float LSTM_MEAN = 111.2f;
     public static final float LSTM_STD = 86.4f;
 
-    public static final float FRAUD_HIGH_RISK_THRESHOLD = 0.75f;
+    public static final float FRAUD_HIGH_RISK_THRESHOLD = 0.08f;
     public static final float FRAUD_ALERT_THRESHOLD = 0.85f;
 
     public static final String REDIS_FEATURES_PREFIX = "features:user:";

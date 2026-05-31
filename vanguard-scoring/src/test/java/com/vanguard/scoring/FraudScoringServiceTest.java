@@ -38,8 +38,8 @@ class FraudScoringServiceTest {
     }
 
     @Test
-    void highRiskThresholdIsSeventyFive() {
-        assertEquals(0.75f, ModelConstants.FRAUD_HIGH_RISK_THRESHOLD);
+    void highRiskThresholdIsEightPercent() {
+        assertEquals(0.08f, ModelConstants.FRAUD_HIGH_RISK_THRESHOLD);
         assertEquals(22, ModelConstants.FRAUD_FEATURE_COUNT);
     }
 }

@@ -1,5 +1,6 @@
 package com.vanguard.ingest.ratelimit;
 
+import com.vanguard.ingest.dto.TransactionRequest;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import org.aspectj.lang.ProceedingJoinPoint;
@@ -31,7 +32,7 @@ public class RateLimitAspect {
 
     @Around("@annotation(rateLimited)")
     public Object enforceRateLimit(ProceedingJoinPoint joinPoint, RateLimited rateLimited) throws Throwable {
-        String userId = resolveUserId();
+        String userId = resolveUserId(joinPoint);
         if (userId == null) {
             return joinPoint.proceed();
         }
@@ -53,7 +54,12 @@ public class RateLimitAspect {
         return joinPoint.proceed();
     }
 
-    private String resolveUserId() {
+    private String resolveUserId(ProceedingJoinPoint joinPoint) {
+        for (Object arg : joinPoint.getArgs()) {
+            if (arg instanceof TransactionRequest req) {
+                return req.userId();
+            }
+        }
         ServletRequestAttributes attrs = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
         if (attrs == null) return null;
         HttpServletRequest request = attrs.getRequest();
